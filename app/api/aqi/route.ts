@@ -64,5 +64,5 @@ export async function GET() {
     .lt('last_seen', new Date(now.getTime() - 4 * 3600000).toISOString())
     .eq('city_token', 'delhi')
 
-  return NextResponse.json({ count: readings.length })
+  return NextResponse.json({ count: readings.length, readings })
 }

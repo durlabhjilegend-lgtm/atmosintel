@@ -51,6 +51,52 @@ export default function Dashboard() {
   const [maintenance, setMaintenance] = useState<any[]>([])
   const [reportMsg, setReportMsg]   = useState('')
   const [stations, setStations]     = useState(MOCK_STATIONS)
+  const [toast, setToast] = useState('')
+
+// Fetch live stations from AQICN on load
+useEffect(() => {
+  const loadLive = async () => {
+    try {
+      const res = await fetch('/api/aqi')
+      if (!res.ok) return
+      const { readings } = await res.json()
+      if (readings?.length > 0) {
+        setStations(readings.map((r: any) => ({
+          id:       r.station_id,
+          name:     r.station_name,
+          lat:      r.lat,
+          lon:      r.lon,
+          aqi:      r.aqi,
+          pm25:     r.pm25,
+          pm10:     r.pm10,
+          so2:      r.so2,
+          no2:      r.no2,
+          ws:       r.wind_speed,
+          wd:       r.wind_direction,
+          humidity: r.humidity,
+        })))
+      }
+    } catch(e) { console.error('Live fetch failed', e) }
+  }
+  loadLive()
+  const interval = setInterval(loadLive, 60000)
+  return () => clearInterval(interval)
+}, [])
+//useEffect to update markers when stations state change
+useEffect(() => {
+  const map = mapRef.current
+  if (!map || !map.isStyleLoaded()) return
+  const src = map.getSource('stations') as maptilersdk.GeoJSONSource
+  if (!src) return
+  src.setData({
+    type: 'FeatureCollection',
+    features: stations.map(s => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
+      properties: { ...s, fill_color: aqiColor(s.aqi) },
+    })),
+  } as any)
+}, [stations])
 
   const mapContainer = useRef<HTMLDivElement>(null)
   const mapRef       = useRef<maptilersdk.Map | null>(null)
@@ -63,22 +109,44 @@ export default function Dashboard() {
     d.setHours(d.getHours() - (23 - i))
     return d.toISOString()
   })
-
-  // ── Fetch live AQI ──────────────────────────────────────────────────
-  useEffect(() => {
-    fetch('/api/aqi').then(r => r.ok && r.json()).catch(() => null)
-  }, [])
-
   // ── Fetch ward GeoJSON ──────────────────────────────────────────────
-  const fetchWards = useCallback(async (hour?: string) => {
-    const url = hour ? `/api/wards?hour=${encodeURIComponent(hour)}` : '/api/wards'
-    const res = await fetch(url).catch(() => null)
-    if (!res?.ok) return
-    const geo = await res.json()
-    setWardData(geo)
-    const src = mapRef.current?.getSource('wards') as maptilersdk.GeoJSONSource
-    src?.setData(geo)
-  }, [])
+const fetchWards = useCallback(async (hour?: string) => {
+  const url = hour
+    ? `/api/wards?hour=${encodeURIComponent(hour)}`
+    : '/api/wards'
+  const res = await fetch(url).catch(() => null)
+  if (!res?.ok) return
+  const geo = await res.json()
+  setWardData(geo)
+
+  const map = mapRef.current
+  if (!map) return
+
+  const apply = () => {
+    const src = map.getSource('wards') as maptilersdk.GeoJSONSource
+    if (src) src.setData(geo)
+    // Also update label layer source data
+    const labelSrc = map.getSource('wards')
+    if (labelSrc) (labelSrc as maptilersdk.GeoJSONSource).setData(geo)
+  }
+
+  if (map.isStyleLoaded() && map.getSource('wards')) {
+    apply()
+  } else {
+    map.once('idle', apply)
+  }
+}, [])
+  // ── Fetch live AQI ──────────────────────────────────────────────────
+useEffect(() => {
+  const refresh = async () => {
+    await fetch('/api/aqi').catch(() => null)
+    await fetchWards()
+  }
+  refresh()
+  const interval = setInterval(refresh, 60 * 1000)
+  return () => clearInterval(interval)
+}, [fetchWards])
+
 
   useEffect(() => { fetchWards() }, [fetchWards])
 
@@ -117,7 +185,8 @@ export default function Dashboard() {
 
     const map = new maptilersdk.Map({
       container: mapContainer.current,
-        style: `https://api.maptiler.com/maps/dataviz-dark/style.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`,      center:    [77.209, 28.613],
+      style: `https://api.maptiler.com/maps/dark-matter/style.json?key=${process.env.NEXT_PUBLIC_MAPTILER_KEY}`,      
+      center: [77.209, 28.613] as [number, number],
       zoom:      10.5,
     })
 
@@ -136,15 +205,37 @@ export default function Dashboard() {
       })
       map.addLayer({
         id: 'ward-line', type: 'line', source: 'wards',
-        paint: { 'line-color': 'rgba(255,255,255,0.15)', 'line-width': 0.5 },
-      })
+        paint: {
+          'line-color': 'rgba(255,255,255,0.6)',
+          'line-width': 1.5,
+        },      })
+
+      map.addLayer({
+      id: 'ward-labels',
+      type: 'symbol',
+      source: 'wards',
+      layout: {
+        'text-field': ['coalesce', ['get', 'ward_name'], ['get', 'name'], ['get', 'NAME'], ''],
+        'text-size': 9,
+        'text-font': ['Open Sans Regular'],
+        'text-max-width': 8,
+        'text-allow-overlap': false,
+        'text-ignore-placement': false,
+      },
+      paint: {
+        'text-color': '#ffffff',
+        'text-halo-color': '#000000',
+        'text-halo-width': 1,
+        'text-opacity': 0.8,
+      },
+    })
 
       // Station markers
       map.addSource('stations', {
         type: 'geojson',
         data: {
           type: 'FeatureCollection',
-          features: MOCK_STATIONS.map(s => ({
+          features: stations.map(s => ({
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
             properties: s,
@@ -234,47 +325,100 @@ export default function Dashboard() {
     return () => { map.remove(); mapRef.current = null }
   }, [tab])
 
-  // ── Toggle heatmap ──────────────────────────────────────────────────
-  useEffect(() => {
-    const map = mapRef.current
-    if (!map) return
-    if (showHeat) {
-      if (!map.getSource('heat')) {
-        map.addSource('heat', {
-          type: 'geojson',
-          data: {
-            type: 'FeatureCollection',
-            features: MOCK_STATIONS.map(s => ({
-              type: 'Feature',
-              geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
-              properties: { aqi: s.aqi },
-            })),
-          },
-        })
-        map.addLayer({
-          id: 'heatmap', type: 'heatmap', source: 'heat',
-          paint: {
-            'heatmap-weight':   ['interpolate', ['linear'], ['get', 'aqi'], 0, 0, 500, 1],
-            'heatmap-intensity': 1.5,
-            'heatmap-radius':   40,
-            'heatmap-opacity':  0.7,
-            'heatmap-color': [
-              'interpolate', ['linear'], ['heatmap-density'],
-              0, 'rgba(0,0,0,0)',
-              0.2, '#22c55e',
-              0.5, '#eab308',
-              0.8, '#ef4444',
-              1,   '#7c3aed',
-            ],
-          },
-        })
-      } else {
-        map.setLayoutProperty('heatmap', 'visibility', 'visible')
-      }
-    } else {
-      if (map.getLayer('heatmap')) map.setLayoutProperty('heatmap', 'visibility', 'none')
+  // ── Wind overlay (station-based arrows) ──────────────────────────────
+useEffect(() => {
+  const map = mapRef.current
+  if (!map || !map.isStyleLoaded()) return
+
+  if (!showWind) {
+    if (map.getLayer('wind-lines')) {
+      map.setLayoutProperty('wind-lines', 'visibility', 'none')
     }
-  }, [showHeat])
+    return
+  }
+
+  const features = stations.map(s => {
+    const rad    = (s.wd * Math.PI) / 180
+    const len    = Math.min(s.ws * 0.018, 0.07)
+    const endLat = s.lat + len * Math.cos(rad)
+    const endLon = s.lon + len * Math.sin(rad)
+    return {
+      type: 'Feature' as const,
+      geometry: {
+        type: 'LineString' as const,
+        coordinates: [[s.lon, s.lat], [endLon, endLat]],
+      },
+      properties: { ws: s.ws },
+    }
+  })
+
+  const geo = { type: 'FeatureCollection' as const, features }
+
+  if (!map.getSource('wind-lines')) {
+    map.addSource('wind-lines', { type: 'geojson', data: geo })
+    map.addLayer({
+      id: 'wind-lines',
+      type: 'line',
+      source: 'wind-lines',
+      paint: {
+        'line-color': '#60a5fa',
+        'line-width': 2,
+        'line-opacity': 0.85,
+      },
+    })
+  } else {
+    ;(map.getSource('wind-lines') as maptilersdk.GeoJSONSource).setData(geo)
+    map.setLayoutProperty('wind-lines', 'visibility', 'visible')
+  }
+}, [showWind, stations])
+
+  // ── Heatmap ─────────────────────────────────────────────────────────
+useEffect(() => {
+  const map = mapRef.current
+  if (!map || !map.isStyleLoaded()) return
+
+  if (showHeat) {
+    const heatData = {
+      type: 'FeatureCollection' as const,
+      features: MOCK_STATIONS.map(s => ({
+        type: 'Feature' as const,
+        geometry: { type: 'Point' as const, coordinates: [s.lon, s.lat] },
+        properties: { weight: s.aqi / 500 },
+      })),
+    }
+
+    if (!map.getSource('heat')) {
+      map.addSource('heat', { type: 'geojson', data: heatData })
+      map.addLayer({
+        id: 'heatmap-layer',
+        type: 'heatmap',
+        source: 'heat',
+        paint: {
+          'heatmap-weight': ['interpolate', ['linear'], ['get', 'weight'], 0, 0, 1, 1],
+          'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 5, 1, 15, 3],
+          'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 5, 40, 15, 80],
+          'heatmap-opacity': 0.75,
+          'heatmap-color': [
+            'interpolate', ['linear'], ['heatmap-density'],
+            0,   'rgba(0,0,0,0)',
+            0.1, '#22c55e',
+            0.3, '#eab308',
+            0.6, '#f97316',
+            0.8, '#ef4444',
+            1.0, '#7c3aed',
+          ],
+        },
+      })
+    } else {
+      ;(map.getSource('heat') as maptilersdk.GeoJSONSource).setData(heatData)
+      map.setLayoutProperty('heatmap-layer', 'visibility', 'visible')
+    }
+  } else {
+    if (map.getLayer('heatmap-layer')) {
+      map.setLayoutProperty('heatmap-layer', 'visibility', 'none')
+    }
+  }
+}, [showHeat])
 
   // ── Alert state ─────────────────────────────────────────────────────
   const maxAQI     = Math.max(...stations.map(s => s.aqi))
@@ -295,7 +439,26 @@ export default function Dashboard() {
     }, ...p])
     setBMsg('')
   }
-
+ //---Action---------------------------------------------------------
+ const sendAction = async (message: string, severity: string) => {
+  await fetch('/api/alert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message,
+      severity,
+      recipients: ['field-staff'],
+    }),
+  })
+  setBroadcasts(p => [{
+    message,
+    severity,
+    sent_at: new Date().toLocaleTimeString('en-IN'),
+  }, ...p])
+  // Show confirmation toast
+  setToast(message)
+  setTimeout(() => setToast(''), 3000)
+}
   // ── Report ──────────────────────────────────────────────────────────
   const generateReport = async (period: string, format: string) => {
     setReportMsg('Generating…')
@@ -533,37 +696,65 @@ export default function Dashboard() {
                   </div>
 
                   {/* Recommended actions */}
-                  <div className="bg-white/[0.03] rounded-xl p-3 border border-white/[0.06]">
-                    <div className="text-[10px] text-white/40 uppercase tracking-wider mb-2">
-                      Recommended Actions
-                    </div>
-                    {selectedWard.grap_stage >= 3 && (
-                      <div className="text-xs text-red-300 mb-1.5">
-                        🚨 Halt all construction activities
-                      </div>
-                    )}
-                    {selectedWard.grap_stage >= 2 && (
-                      <div className="text-xs text-orange-300 mb-1.5">
-                        🚗 Restrict heavy vehicle traffic
-                      </div>
-                    )}
-                    {selectedWard.grap_stage >= 1 && (
-                      <>
-                        <div className="text-xs text-yellow-300 mb-1.5">
-                          💧 Deploy water sprinklers
-                        </div>
-                        <div className="text-xs text-yellow-300 mb-1.5">
-                          📢 Issue health advisory
-                        </div>
-                      </>
-                    )}
-                    <div className="text-xs text-green-300">
-                      📍 Increase monitoring frequency
-                    </div>
+                  {/* Action buttons */}
+<div className="bg-white/[0.03] rounded-xl p-3 border border-white/[0.06]">
+  <div className="text-[10px] text-white/40 uppercase tracking-wider mb-3">
+    Quick Actions
+  </div>
+  <div className="space-y-2">
+    {selectedWard.grap_stage >= 3 && (
+      <button
+        onClick={() => sendAction('🚧 HALT CONSTRUCTION orders issued for ' + selectedWard.ward_name, 'critical')}
+        className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium
+                   bg-red-500/10 border border-red-500/30 text-red-300
+                   hover:bg-red-500/20 transition-all">
+        🚧 Halt All Construction in {selectedWard.ward_name}
+      </button>
+    )}
+    {selectedWard.grap_stage >= 2 && (
+      <button
+        onClick={() => sendAction('🚗 TRAFFIC RESTRICTION activated in ' + selectedWard.ward_name, 'warning')}
+        className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium
+                   bg-orange-500/10 border border-orange-500/30 text-orange-300
+                   hover:bg-orange-500/20 transition-all">
+        🚗 Restrict Heavy Traffic in {selectedWard.ward_name}
+      </button>
+    )}
+    <button
+      onClick={() => sendAction('💧 WATER SPRINKLERS deployed in ' + selectedWard.ward_name, 'info')}
+      className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium
+                 bg-blue-500/10 border border-blue-500/30 text-blue-300
+                 hover:bg-blue-500/20 transition-all">
+      💧 Deploy Water Sprinklers
+    </button>
+    <button
+      onClick={() => sendAction('📢 HEALTH ADVISORY issued for residents of ' + selectedWard.ward_name, 'warning')}
+      className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium
+                 bg-yellow-500/10 border border-yellow-500/30 text-yellow-300
+                 hover:bg-yellow-500/20 transition-all">
+      📢 Issue Health Advisory
+    </button>
+    <button
+      onClick={() => sendAction('📍 INCREASED MONITORING requested for ' + selectedWard.ward_name, 'info')}
+      className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium
+                 bg-purple-500/10 border border-purple-500/30 text-purple-300
+                 hover:bg-purple-500/20 transition-all">
+      📍 Increase Monitoring Frequency
+    </button>
+  </div>
+</div>   
                   </div>
-                </div>
+              
               </>
             )}
+            {toast && (
+  <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50
+                  bg-green-900/90 border border-green-500/50 text-green-300
+                  px-4 py-2 rounded-xl text-xs font-medium backdrop-blur
+                  shadow-xl max-w-sm text-center">
+    ✅ {toast}
+  </div>
+)}
           </div>
         </div>
       )}
