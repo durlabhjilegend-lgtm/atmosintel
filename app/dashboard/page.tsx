@@ -380,7 +380,7 @@ useEffect(() => {
   if (showHeat) {
     const heatData = {
       type: 'FeatureCollection' as const,
-      features: MOCK_STATIONS.map(s => ({
+      features: stations.map(s => ({
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [s.lon, s.lat] },
         properties: { weight: s.aqi / 500 },
