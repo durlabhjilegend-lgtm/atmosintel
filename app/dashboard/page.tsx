@@ -37,7 +37,7 @@ const MOCK_STATIONS = [
 ]
 
 type Tab = 'map' | 'analytics' | 'operations'
-
+const INTERVALS = 12
 export default function Dashboard() {
   const [tab, setTab]               = useState<Tab>('map')
   const [wardData, setWardData]     = useState<any>(null)
@@ -45,20 +45,22 @@ export default function Dashboard() {
   const [showHeat, setShowHeat]     = useState(false)
   const [showWind, setShowWind]     = useState(false)
   const [isPlaying, setIsPlaying]   = useState(false)
-  const [timeIdx, setTimeIdx]       = useState(23)
+  const [timeIdx, setTimeIdx] = useState(INTERVALS - 1)
   const [broadcasts, setBroadcasts] = useState<any[]>([])
   const [broadcastMsg, setBMsg]     = useState('')
   const [maintenance, setMaintenance] = useState<any[]>([])
   const [reportMsg, setReportMsg]   = useState('')
-  const [stations, setStations]     = useState(MOCK_STATIONS)
+  const [stations, setStations]   = useState<any[]>([])
+  const [loading,  setLoading]    = useState(true)
   const [toast, setToast] = useState('')
 
 // Fetch live stations from AQICN on load
 useEffect(() => {
   const loadLive = async () => {
     try {
+      setLoading(true)
       const res = await fetch('/api/aqi')
-      if (!res.ok) return
+      if (!res.ok) throw new Error('fetch failed')
       const { readings } = await res.json()
       if (readings?.length > 0) {
         setStations(readings.map((r: any) => ({
@@ -66,20 +68,24 @@ useEffect(() => {
           name:     r.station_name,
           lat:      r.lat,
           lon:      r.lon,
-          aqi:      r.aqi,
-          pm25:     r.pm25,
-          pm10:     r.pm10,
-          so2:      r.so2,
-          no2:      r.no2,
-          ws:       r.wind_speed,
-          wd:       r.wind_direction,
-          humidity: r.humidity,
+          aqi:      r.aqi       || 0,
+          pm25:     r.pm25      || 0,
+          pm10:     r.pm10      || 0,
+          so2:      r.so2       || 0,
+          no2:      r.no2       || 0,
+          ws:       r.wind_speed    || 2,
+          wd:       r.wind_direction || 180,
+          humidity: r.humidity  || 50,
         })))
       }
-    } catch(e) { console.error('Live fetch failed', e) }
+    } catch(e) {
+      console.error('Live fetch failed', e)
+    } finally {
+      setLoading(false)
+    }
   }
   loadLive()
-  const interval = setInterval(loadLive, 60000)
+  const interval = setInterval(loadLive, 5 * 60 * 1000)
   return () => clearInterval(interval)
 }, [])
 //useEffect to update markers when stations state change
@@ -103,12 +109,14 @@ useEffect(() => {
   const popupRef     = useRef<maptilersdk.Popup | null>(null)
   const playRef      = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const hours = Array.from({ length: 24 }, (_, i) => {
-    const d = new Date()
-    d.setMinutes(0, 0, 0)
-    d.setHours(d.getHours() - (23 - i))
-    return d.toISOString()
-  })
+// 12 snapshots, each 6 hours apart = last 72 hours
+
+const hours = Array.from({ length: INTERVALS }, (_, i) => {
+  const d = new Date()
+  d.setMinutes(0, 0, 0)
+  d.setHours(d.getHours() - (INTERVALS - 1 - i) * 6)
+  return d.toISOString()
+})
   // ── Fetch ward GeoJSON ──────────────────────────────────────────────
 const fetchWards = useCallback(async (hour?: string) => {
   const url = hour
@@ -255,7 +263,7 @@ useEffect(() => {
       // Set station colors
       const stationGeo = {
         type: 'FeatureCollection',
-        features: MOCK_STATIONS.map(s => ({
+        features: stations.map(s => ({
           type: 'Feature',
           geometry: { type: 'Point', coordinates: [s.lon, s.lat] },
           properties: { ...s, fill_color: aqiColor(s.aqi) },
@@ -488,7 +496,23 @@ useEffect(() => {
     { id: 'analytics',  label: 'Analytics',   icon: ChevronRight },
     { id: 'operations', label: 'Operations',  icon: Wind },
   ]
-
+if (loading && stations.length === 0) {
+  return (
+    <div className="h-screen bg-[#0b0c10] flex flex-col items-center justify-center gap-4">
+      <div className="text-[#00d4ff] font-mono text-2xl font-bold tracking-widest">
+        AtmosIntel
+      </div>
+      <div className="text-white/40 text-sm">Loading live AQI data for Delhi-NCR…</div>
+      <div className="flex gap-1.5 mt-2">
+        {[0,1,2].map(i => (
+          <div key={i}
+               className="w-2 h-2 rounded-full bg-[#00d4ff] animate-bounce"
+               style={{ animationDelay: `${i * 0.15}s` }} />
+        ))}
+      </div>
+    </div>
+  )
+}
   return (
     <div className="h-screen flex flex-col bg-[#0b0c10] text-white overflow-hidden">
 
@@ -592,19 +616,22 @@ useEffect(() => {
                       className="text-white transition-colors">
                 {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5" />}
               </button>
-              <input type="range" min={0} max={23} value={timeIdx}
+              <input type="range" min={0} max={INTERVALS - 1} value={timeIdx}
                      onChange={e => {
                        if (isPlaying) return
                        const i = Number(e.target.value)
                        setTimeIdx(i)
-                       if (i === 23) fetchWards()
+                       if (i === INTERVALS - 1) fetchWards()
                        else fetchWards(hours[i])
                      }}
                      className="flex-1 accent-[#00d4ff]" />
               <span className="text-xs font-mono text-amber-300 min-w-[80px] text-right">
-                {timeIdx === 23 ? '● Live' : new Date(hours[timeIdx]).toLocaleTimeString('en-IN', {
-                  hour: '2-digit', minute: '2-digit',
-                })}
+                {timeIdx === INTERVALS - 1
+  ? '● Live'
+  : new Date(hours[timeIdx]).toLocaleDateString('en-IN', {
+      day: '2-digit', month: 'short',
+      hour: '2-digit', minute: '2-digit',
+    })}
               </span>
             </div>
 
@@ -773,7 +800,7 @@ useEffect(() => {
                   🔴 Most Polluted
                 </div>
                 {[...stations].sort((a,b) => b.aqi-a.aqi).slice(0,5).map((s,i) => (
-                  <div key={s.id} className="flex items-center gap-3 py-2
+                  <div key={`${s.id}-${i}`} className="flex items-center gap-3 py-2
                                               border-b border-white/[0.05] last:border-0">
                     <span className="text-white/20 text-xs w-4">#{i+1}</span>
                     <span className="flex-1 text-sm text-white/70">{s.name}</span>
@@ -789,7 +816,7 @@ useEffect(() => {
                   🟢 Cleanest Areas
                 </div>
                 {[...stations].sort((a,b) => a.aqi-b.aqi).slice(0,5).map((s,i) => (
-                  <div key={s.id} className="flex items-center gap-3 py-2
+                  <div key={`${s.id}-${i}`} className="flex items-center gap-3 py-2
                                               border-b border-white/[0.05] last:border-0">
                     <span className="text-white/20 text-xs w-4">#{i+1}</span>
                     <span className="flex-1 text-sm text-white/70">{s.name}</span>

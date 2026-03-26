@@ -48,6 +48,7 @@ export async function GET(req: NextRequest) {
       ...f,
       properties: {
         ...f.properties,
+        ward_name: f.properties.WardName || f.properties.ward_name || f.properties.name || f.properties.NAME || 'Unknown Ward',
         aqi:            Math.round(aqi),
         pm25:           Math.round(pm25),
         pm10:           Math.round(pm10),
