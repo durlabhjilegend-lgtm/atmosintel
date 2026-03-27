@@ -4,8 +4,9 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import * as maptilersdk from '@maptiler/sdk'
 import '@maptiler/sdk/dist/maptiler-sdk.css'
 import { aqiColor, aqiLabel, grapStage } from '@/lib/idw'
+import ReportGenerator from '@/components/ReportGenerator'
 import {
-  AlertTriangle, Wind, Activity, FileDown,
+  AlertTriangle, Wind, Activity,
   Play, Pause, SkipBack, Radio, ChevronRight
 } from 'lucide-react'
 
@@ -45,14 +46,19 @@ export default function Dashboard() {
   const [showHeat, setShowHeat]     = useState(false)
   const [showWind, setShowWind]     = useState(false)
   const [isPlaying, setIsPlaying]   = useState(false)
-  const [timeIdx, setTimeIdx] = useState(INTERVALS - 1)
+  const [timeIdx, setTimeIdx] = useState(- 1)
   const [broadcasts, setBroadcasts] = useState<any[]>([])
   const [broadcastMsg, setBMsg]     = useState('')
   const [maintenance, setMaintenance] = useState<any[]>([])
-  const [reportMsg, setReportMsg]   = useState('')
   const [stations, setStations]   = useState<any[]>([])
   const [loading,  setLoading]    = useState(true)
   const [toast, setToast] = useState('')
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const t = params.get('tab') as Tab
+    if (t && ['map','analytics','operations'].includes(t)) setTab(t)
+  }, [])
 
 // Fetch live stations from AQICN on load
 useEffect(() => {
@@ -168,23 +174,39 @@ useEffect(() => {
     })
   }, [])
 
-  // ── Timeline player ─────────────────────────────────────────────────
-  useEffect(() => {
-    if (isPlaying) {
-      playRef.current = setInterval(() => {
-        setTimeIdx(p => {
-          const n = p + 1
-          if (n >= 23) { setIsPlaying(false); fetchWards(); return 23 }
-          fetchWards(hours[n])
-          return n
-        })
-      }, 900)
-    } else {
-      if (playRef.current) clearInterval(playRef.current)
-    }
-    return () => { if (playRef.current) clearInterval(playRef.current) }
-  }, [isPlaying, fetchWards, hours])
-
+ {/* Timeline — hour selector */}
+<div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10
+                bg-black/85 backdrop-blur border border-white/10
+                rounded-2xl px-4 py-3 shadow-xl">
+  <div className="flex items-center gap-3">
+    <span className="text-xs text-white/40 font-mono whitespace-nowrap">View AQI at:</span>
+    <div className="flex gap-1 overflow-x-auto max-w-md">
+      <button
+        onClick={() => { setTimeIdx(-1); fetchWards() }}
+        className={`px-3 py-1 rounded-lg text-xs font-mono whitespace-nowrap transition-all flex-shrink-0
+          ${timeIdx === -1
+            ? 'bg-[#00d4ff]/20 text-[#00d4ff] border border-[#00d4ff]/40'
+            : 'text-white/40 hover:text-white border border-transparent'}`}>
+        ● Live
+      </button>
+      {Array.from({ length: 12 }, (_, i) => {
+        const d = new Date()
+        d.setMinutes(0, 0, 0)
+        d.setHours(d.getHours() - (11 - i))
+        return { idx: i, label: d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }), iso: d.toISOString() }
+      }).map(h => (
+        <button key={h.idx}
+                onClick={() => { setTimeIdx(h.idx); fetchWards(h.iso) }}
+                className={`px-3 py-1 rounded-lg text-xs font-mono whitespace-nowrap transition-all flex-shrink-0
+                  ${timeIdx === h.idx
+                    ? 'bg-white/15 text-white border border-white/30'
+                    : 'text-white/30 hover:text-white/60 border border-transparent'}`}>
+          {h.label}
+        </button>
+      ))}
+    </div>
+  </div>
+</div>
   // ── Map init ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapContainer.current || mapRef.current || tab !== 'map') return
@@ -467,29 +489,38 @@ useEffect(() => {
   setToast(message)
   setTimeout(() => setToast(''), 3000)
 }
-  // ── Report ──────────────────────────────────────────────────────────
-  const generateReport = async (period: string, format: string) => {
-    setReportMsg('Generating…')
-    const res = await fetch('/api/report', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ period, format }),
-    })
-    if (res.ok && format === 'csv') {
-      const blob = await res.blob()
-      const a    = document.createElement('a')
-      a.href     = URL.createObjectURL(blob)
-      a.download = `delhi_aqi_${period}.csv`
-      a.click()
-      setReportMsg('Downloaded!')
-    } else if (res.ok) {
-      setReportMsg('Report data ready (connect PDF renderer to export)')
-    } else {
-      setReportMsg('No data yet — collect AQI data first')
-    }
-    setTimeout(() => setReportMsg(''), 3000)
-  }
 
+  const detectSources = (stationList: any[]) => {
+    return stationList.map(s => {
+      const ratio = (s.pm10 || 0) / Math.max(s.pm25 || 1, 1)
+      let source = 'Mixed / Unknown'
+      let confidence = 60
+      let reason = ''
+
+      if ((s.pm10 || 0) > 150 && (s.ws || 2) < 2 && ratio > 3) {
+        source = 'Construction Dust'
+        confidence = 87
+        reason = `High PM10 (${s.pm10}) + Low wind (${s.ws}m/s) = dust not dispersing`
+      } else if ((s.pm25 || 0) > 120 && (s.so2 || 0) > 30) {
+        source = 'Industrial Emission'
+        confidence = 82
+        reason = `Elevated PM2.5 (${s.pm25}) + SO₂ (${s.so2}) signature`
+      } else if ((s.pm25 || 0) > 80 && ratio < 2 && (s.so2 || 0) < 20) {
+        source = 'Biomass Burning'
+        confidence = 78
+        reason = `Fine particle dominance (PM2.5 ${s.pm25}) with low SO₂`
+      } else if ((s.no2 || 0) > 60 && (s.so2 || 0) < 15) {
+        source = 'Vehicular Emissions'
+        confidence = 84
+        reason = `High NO₂ (${s.no2}) without SO₂ = traffic, not industry`
+      } else if ((s.pm10 || 0) > 200 && (s.ws || 0) > 4) {
+        source = 'Dust Storm / Natural'
+        confidence = 75
+        reason = `Very high PM10 (${s.pm10}) + strong wind (${s.ws}m/s)`
+      }
+      return { ...s, source, confidence, reason }
+    }).filter(s => s.source !== 'Mixed / Unknown' || s.aqi > 200)
+  }
   // ── Tabs ─────────────────────────────────────────────────────────────
   const tabs: { id: Tab; label: string; icon: any }[] = [
     { id: 'map',        label: 'Live Map',    icon: Activity },
@@ -876,7 +907,49 @@ if (loading && stations.length === 0) {
                 })}
               </div>
             </div>
-
+            {/* ML Source Detection */}
+<div className="bg-[#12141c] rounded-xl border border-amber-500/20 p-4">
+  <div className="flex items-center gap-2 mb-4">
+    <span className="text-amber-400 text-sm">🔬</span>
+    <span className="text-sm font-semibold text-amber-400">
+      ML Pollution Source Detection
+    </span>
+    <span className="ml-auto text-[10px] text-white/30 bg-white/[0.04]
+                     px-2 py-0.5 rounded-full">
+      Rule-Based ML · Live
+    </span>
+  </div>
+  <div className="space-y-3">
+    {detectSources(stations).slice(0,5).map((s, i) => (
+      <div key={i} className="bg-white/[0.03] rounded-xl p-3 border border-white/[0.05]">
+        <div className="flex items-start justify-between mb-1">
+          <div className="font-semibold text-sm text-white">{s.name}</div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-white/30">Confidence</span>
+            <span className="font-mono text-xs font-bold text-amber-400">
+              {s.confidence}%
+            </span>
+          </div>
+        </div>
+        <div className="text-xs text-amber-300 mb-1.5 font-medium">
+          ⚠ {s.source}
+        </div>
+        <div className="text-[10px] text-white/40 leading-relaxed">{s.reason}</div>
+        <div className="mt-2 flex items-center gap-2">
+          <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
+            <div className="h-full rounded-full bg-amber-400/60"
+                 style={{ width: `${s.confidence}%` }} />
+          </div>
+        </div>
+      </div>
+    ))}
+    {detectSources(stations).length === 0 && (
+      <div className="text-white/20 text-sm text-center py-4">
+        Loading source data…
+      </div>
+    )}
+  </div>
+</div>
             {/* Prediction */}
             <div className="bg-[#12141c] rounded-xl border border-white/10 p-4">
               <div className="text-xs text-white/40 uppercase tracking-wider mb-3">
@@ -1036,28 +1109,7 @@ if (loading && stations.length === 0) {
               </table>
             </div>
 
-            {/* Reports */}
-            <div className="bg-[#12141c] rounded-xl border border-white/10 p-4">
-              <div className="text-sm font-semibold text-white/70 mb-4">
-                📄 Generate Report
-              </div>
-              <div className="flex gap-3 flex-wrap">
-                {['daily','weekly','monthly'].map(p => (
-                  <div key={p} className="flex gap-2">
-                    <button onClick={() => generateReport(p, 'csv')}
-                            className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs
-                                       bg-green-500/10 border border-green-500/30 text-green-400
-                                       hover:bg-green-500/20 transition-all capitalize">
-                      <FileDown className="w-3.5 h-3.5" />
-                      {p} CSV
-                    </button>
-                  </div>
-                ))}
-              </div>
-              {reportMsg && (
-                <p className="text-xs text-white/40 mt-3">{reportMsg}</p>
-              )}
-            </div>
+            <ReportGenerator />
 
             {/* Alert broadcast */}
             <div className="bg-[#12141c] rounded-xl border border-white/10 p-4">
