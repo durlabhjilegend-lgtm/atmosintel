@@ -123,6 +123,68 @@ const hours = Array.from({ length: INTERVALS }, (_, i) => {
   d.setHours(d.getHours() - (INTERVALS - 1 - i) * 6)
   return d.toISOString()
 })
+
+const haversineKm = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const R = 6371
+  const dLat = ((lat2 - lat1) * Math.PI) / 180
+  const dLon = ((lon2 - lon1) * Math.PI) / 180
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+const isMissingMetric = (v: any) => v == null || Number.isNaN(v) || +v === 0
+
+const enrichWardProps = (ward: any, all: any[]) => {
+  if (!ward || !ward.properties) return ward
+
+  const fields = ['aqi', 'pm25', 'pm10', 'so2', 'no2', 'humidity', 'wind_speed', 'wind_direction']
+  const coords = ward.geometry?.coordinates?.[0] || []
+  const cenLon = coords.reduce((sum: number, c: any) => sum + c[0], 0) / Math.max(coords.length, 1)
+  const cenLat = coords.reduce((sum: number, c: any) => sum + c[1], 0) / Math.max(coords.length, 1)
+
+  const enriched = { ...ward, properties: { ...ward.properties } }
+
+  fields.forEach((field) => {
+    if (!isMissingMetric(enriched.properties[field])) return
+
+    const fallback = [...all]
+      .filter((f) => f !== ward && f.properties?.[field] != null)
+      .map((f) => {
+        const fcoords = f.geometry?.coordinates?.[0] || []
+        const fx = fcoords.reduce((sum: number, c: any) => sum + c[0], 0) / Math.max(fcoords.length, 1)
+        const fy = fcoords.reduce((sum: number, c: any) => sum + c[1], 0) / Math.max(fcoords.length, 1)
+        return {
+          dist: haversineKm(cenLat, cenLon, fy, fx),
+          value: f.properties[field],
+        }
+      })
+      .sort((a, b) => a.dist - b.dist)[0]
+
+    if (fallback?.value != null) {
+      enriched.properties[field] = fallback.value
+    }
+  })
+
+  const aqi = Number(enriched.properties.aqi)
+  if (!Number.isNaN(aqi)) {
+    enriched.properties.grap_stage = grapStage(aqi)
+    enriched.properties.fill_color = aqiColor(aqi)
+    enriched.properties.aqi_label = aqiLabel(aqi)
+  }
+
+  return enriched
+}
+
+const enrichWardGeo = (geo: any) => {
+  if (!geo?.features) return geo
+  const enrichedFeatures = geo.features.map((f: any) => enrichWardProps(f, geo.features))
+  return { ...geo, features: enrichedFeatures }
+}
+
   // ── Fetch ward GeoJSON ──────────────────────────────────────────────
 const fetchWards = useCallback(async (hour?: string) => {
   const url = hour
@@ -130,7 +192,8 @@ const fetchWards = useCallback(async (hour?: string) => {
     : '/api/wards'
   const res = await fetch(url).catch(() => null)
   if (!res?.ok) return
-  const geo = await res.json()
+  const rawGeo = await res.json()
+  const geo = enrichWardGeo(rawGeo)
   setWardData(geo)
 
   const map = mapRef.current
